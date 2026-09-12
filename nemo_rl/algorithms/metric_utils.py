@@ -96,3 +96,33 @@ def print_setup_timing_summary(metrics: SetupTimingMetrics) -> None:
 
     print(f"  Other setup: {metrics.other_setup_time_s:.1f}s")
     print(f"  Total setup: {metrics.total_setup_time_s:.1f}s", flush=True)
+
+
+def extract_vllm_request_time_metrics(
+    metrics: dict[str, Any] | None,
+) -> dict[str, float]:
+    """Remove cumulative latency samples and return request-weighted window means.
+
+    Series are separated by actor and Prometheus labels. Reset counters are
+    excluded; windows with no completed requests do not report a false zero.
+    """
+    if not metrics:
+        return {}
+    totals: dict[str, tuple[float, int]] = {}
+    for series in metrics.pop("request_time_histograms", {}).values():
+        for (name, _labels), snapshots in series.items():
+            if len(snapshots) < 2:
+                continue
+            first_sum, first_count = snapshots[0]
+            last_sum, last_count = snapshots[-1]
+            count = last_count - first_count
+            elapsed = last_sum - first_sum
+            if count <= 0 or elapsed < 0:
+                continue
+            total_sum, total_count = totals.get(name, (0.0, 0))
+            totals[name] = (total_sum + elapsed, total_count + count)
+    return {
+        "vllm/" + name.removeprefix("vllm:").removesuffix("_seconds") + "_mean_s": total
+        / count
+        for name, (total, count) in totals.items()
+    }

@@ -238,12 +238,13 @@ def _estimate_refit_tensor_size_in_bytes(
 ) -> int:
     """Estimate the gathered tensor size produced by Bridge export.
 
-    Floating-point model weights are exported at the policy dtype. Integral
-    state (for example BatchNorm ``num_batches_tracked`` buffers) keeps its
-    original dtype and must not be looked up in a floating-point-only table.
+    Bridge preserves payload dtypes, including FP32 scales and FP8 weights.
+    Allow for both the source storage and logical export dtype: quantized
+    sources may be materialized for logical-weight destinations. Integral
+    buffers retain their original element size.
     """
     element_size = (
-        torch.empty((), dtype=export_dtype).element_size()
+        max(param.element_size(), torch.empty((), dtype=export_dtype).element_size())
         if param.is_floating_point()
         else param.element_size()
     )

@@ -1122,7 +1122,7 @@ def test_refit_size_estimate_preserves_integral_buffer_dtype():
     )
 
 
-def test_refit_size_estimate_casts_floating_weight_to_export_dtype():
+def test_refit_size_estimate_preserves_larger_floating_payload():
     from nemo_rl.models.policy.workers.megatron_policy_worker import (
         _estimate_refit_tensor_size_in_bytes,
     )
@@ -1133,7 +1133,7 @@ def test_refit_size_estimate_casts_floating_weight_to_export_dtype():
         _estimate_refit_tensor_size_in_bytes(
             param, export_dtype=torch.bfloat16, tp_size=2, ep_size=4
         )
-        == 3 * 2 * 2 * 4
+        == 3 * 4 * 2 * 4
     )
 
 

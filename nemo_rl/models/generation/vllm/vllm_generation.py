@@ -1454,6 +1454,12 @@ class VllmGeneration(GenerationInterface):
             if generation_tokens:
                 vllm_logger_metrics["generation_tokens"][dp_idx] = generation_tokens
 
+        vllm_logger_metrics["request_time_histograms"] = {  # type: ignore[assignment]
+            dp_idx: stats["request_time_histograms"]
+            for dp_idx, stats in zip(dp_indices, results)
+            if stats and stats.get("request_time_histograms")
+        }
+
         return vllm_logger_metrics
 
     def clear_vllm_logger_metrics(self) -> None:

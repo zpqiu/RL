@@ -49,6 +49,7 @@ from nemo_rl.algorithms.loss import (
 from nemo_rl.algorithms.loss.interfaces import LossFunction
 from nemo_rl.algorithms.metric_utils import (
     SetupTimingMetrics,
+    extract_vllm_request_time_metrics,
     print_setup_timing_summary,
 )
 from nemo_rl.algorithms.opd import OnPolicyDistillationConfig
@@ -2673,6 +2674,7 @@ def _log_mixed_rewards_and_advantages_information(
 def _placeholder_seq_logprob_error_metrics() -> dict[str, float]:
     """Zero-valued seq-level metrics used when the prev_logprobs forward is skipped."""
     return {
+        "token_logprob_diff_valid_tokens": 0,
         "max_seq_mult_prob_error": 0.0,
         "mean_seq_mult_prob_error": 0.0,
         "min_seq_mult_prob_error": 0.0,
@@ -2763,6 +2765,31 @@ def compute_and_apply_seq_logprob_error_masking(
     # Use combined mask exactly as in loss function
     mask = token_mask * sample_mask.unsqueeze(-1)
 
+    # Measure the frozen trainer versus rollout before filtering high-error
+    # sequences. Select tokens before subtraction so masked NaNs cannot leak in.
+    valid_tokens = mask.bool()
+    token_diff = (
+        prev_logprobs.float()[valid_tokens] - generation_logprobs.float()[valid_tokens]
+    )
+    token_metrics: dict[str, float | int] = {
+        "token_logprob_diff_valid_tokens": token_diff.numel()
+    }
+    if token_diff.numel():
+        token_metrics.update(
+            token_logprob_diff_mean=token_diff.mean().item(),
+            token_logprob_abs_diff_mean=token_diff.abs().mean().item(),
+        )
+        # Give each nonempty sequence equal weight, regardless of length.
+        seq_token_counts = valid_tokens.sum(dim=-1)
+        nonempty_seqs = seq_token_counts > 0
+        abs_diff = torch.zeros_like(prev_logprobs, dtype=torch.float32)
+        abs_diff[valid_tokens] = token_diff.abs()
+        token_metrics["seq_logprob_abs_diff_mean"] = (
+            (abs_diff.sum(dim=-1)[nonempty_seqs] / seq_token_counts[nonempty_seqs])
+            .mean()
+            .item()
+        )
+
     # Calculate sequence-level multiplicative prob error.
     #
     # NOTE: When a sequence is fully masked (mask.sum == 0), it should not contribute to
@@ -2848,6 +2875,7 @@ def compute_and_apply_seq_logprob_error_masking(
             )
 
     return {
+        **token_metrics,
         "max_seq_mult_prob_error": max_seq_mult_prob_error,
         "mean_seq_mult_prob_error": mean_seq_mult_prob_error,
         "min_seq_mult_prob_error": min_seq_mult_prob_error,
@@ -3774,6 +3802,9 @@ def grpo_train(
                         print(f"Skipping aggregation for {k} ({type(v)})")
 
                 metrics.update(rollout_metrics)
+                metrics.update(
+                    extract_vllm_request_time_metrics(generation_logger_metrics)
+                )
                 metrics["generation_logger_metrics"] = generation_logger_metrics
                 total_valid_tokens += metrics["global_valid_toks"]
 
@@ -5635,6 +5666,9 @@ def async_grpo_train(
                         metrics[k] = np.sum(v).item()
                 metrics.update(rollout_metrics)
                 if generation_logger_metrics is not None:
+                    metrics.update(
+                        extract_vllm_request_time_metrics(generation_logger_metrics)
+                    )
                     metrics["generation_logger_metrics"] = generation_logger_metrics
                 total_valid_tokens += metrics["global_valid_toks"]
 

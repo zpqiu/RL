@@ -67,6 +67,7 @@ from nemo_rl.algorithms.loss import (
     ClippedPGLossDataDict,
 )
 from nemo_rl.algorithms.loss.interfaces import LossFunction
+from nemo_rl.algorithms.metric_utils import extract_vllm_request_time_metrics
 from nemo_rl.algorithms.reward_functions import apply_reward_shaping
 from nemo_rl.algorithms.utils import (
     calculate_baseline_and_std_per_prompt,
@@ -1145,6 +1146,9 @@ def grpo_train_sync(
                         print(f"Skipping aggregation for {k} ({type(v)})")
 
                 metrics.update(rollout_metrics)
+                metrics.update(
+                    extract_vllm_request_time_metrics(generation_logger_metrics)
+                )
                 metrics["generation_logger_metrics"] = generation_logger_metrics
                 total_valid_tokens += metrics["global_valid_toks"]
 

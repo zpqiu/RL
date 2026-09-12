@@ -315,7 +315,12 @@ class VllmAsyncGenerationWorkerImpl(
         Controlled by vllm_metrics_logger_interval (default: 0.5) in vllm_cfg.
         Runs only on the model-owner actor.
         """
-        from vllm.v1.metrics.reader import Gauge, Counter, get_metrics_snapshot
+        from vllm.v1.metrics.reader import (
+            Gauge,
+            Counter,
+            Histogram,
+            get_metrics_snapshot,
+        )
 
         assert self.cfg["vllm_cfg"].get("async_engine", False), (
             "vLLM metrics logger is only supported with async engine enabled"
@@ -340,11 +345,21 @@ class VllmAsyncGenerationWorkerImpl(
         self.num_pending_samples: list[int] = []
         self.kv_cache_usage_perc: list[float] = []
         self.generation_tokens: list[int] = []
+        self.request_time_histograms: dict[
+            tuple[str, tuple[tuple[str, str], ...]], list[tuple[float, int]]
+        ] = {}
+        request_time_names = {
+            "vllm:request_queue_time_seconds",
+            "vllm:request_prefill_time_seconds",
+            "vllm:request_decode_time_seconds",
+            "vllm:request_inference_time_seconds",
+            "vllm:time_to_first_token_seconds",
+            "vllm:e2e_request_latency_seconds",
+        }
 
         def _logger_loop():
-            # Delay a little to let engine settle
-            time.sleep(min(2.0, interval_s))
-            while True:
+            # Establish the first baseline without delaying short rollouts.
+            while not stop_event.is_set():
                 try:
                     for m in get_metrics_snapshot():
                         with self._vllm_metrics_lock:
@@ -361,13 +376,32 @@ class VllmAsyncGenerationWorkerImpl(
                             elif isinstance(m, Counter):
                                 if m.name == "vllm:generation_tokens":
                                     self.generation_tokens.append(int(m.value))
+                            elif (
+                                isinstance(m, Histogram)
+                                and m.name in request_time_names
+                            ):
+                                key = (m.name, tuple(sorted(m.labels.items())))
+                                sample = (float(m.sum), int(m.count))
+                                snapshots = self.request_time_histograms.setdefault(
+                                    key, []
+                                )
+                                # Keep only window endpoints; memory stays bounded.
+                                if snapshots and (
+                                    sample[0] < snapshots[-1][0]
+                                    or sample[1] < snapshots[-1][1]
+                                ):
+                                    snapshots.clear()
+                                if len(snapshots) < 2:
+                                    snapshots.append(sample)
+                                else:
+                                    snapshots[-1] = sample
                 except Exception:
                     print(
                         "⚠️[vLLM Metric Logger] Exception in vLLM metrics logger",
                         flush=True,
                     )
                     pass
-                time.sleep(interval_s)
+                stop_event.wait(interval_s)
 
         t = threading.Thread(
             target=_logger_loop, name="vllm-metrics-logger", daemon=True
@@ -389,6 +423,7 @@ class VllmAsyncGenerationWorkerImpl(
                 "num_pending_samples": copy.deepcopy(self.num_pending_samples),
                 "kv_cache_usage_perc": copy.deepcopy(self.kv_cache_usage_perc),
                 "generation_tokens": copy.deepcopy(self.generation_tokens),
+                "request_time_histograms": copy.deepcopy(self.request_time_histograms),
             }
         return metric
 
@@ -401,6 +436,12 @@ class VllmAsyncGenerationWorkerImpl(
             self.num_pending_samples = []
             self.kv_cache_usage_perc = []
             self.generation_tokens = []
+            # Carry the last observation as the baseline of the next window.
+            self.request_time_histograms = {
+                key: [snapshots[-1]]
+                for key, snapshots in self.request_time_histograms.items()
+                if snapshots
+            }
 
     async def post_init_async(self):
         self._engine_loop = asyncio.get_running_loop()
